@@ -1,0 +1,206 @@
+import { Telegraf, session, Scenes } from 'telegraf';
+import { message } from 'telegraf/filters';
+import dotenv from 'dotenv';
+import axios from 'axios';
+import { resolveLocationPath, uploadPhotoToDrive, logToGoogleSheets } from './services/google';
+import sectorWizard, { MyBotContext } from './scenes/sectorWizard';
+
+dotenv.config();
+
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+if (!TOKEN) {
+  console.error("ERRO: TELEGRAM_BOT_TOKEN ausente. Verifique o .env");
+  process.exit(1);
+}
+
+// Inicializa bot com tipagem estendida
+export const bot = new Telegraf<MyBotContext>(TOKEN);
+
+// Configuração das sessões e middleware para injetar RAM storage (buffer)
+bot.use(session());
+
+bot.use((ctx, next) => {
+  if (!ctx.session) {
+    (ctx as any).session = {};
+  }
+  // Garante que o mediaBuffer sempre exista na sessão atual do usuário
+  if (!ctx.session.mediaBuffer) {
+    ctx.session.mediaBuffer = [];
+  }
+  return next();
+});
+
+// Registrar Scenes
+const stage = new Scenes.Stage<MyBotContext>([sectorWizard]);
+bot.use(stage.middleware());
+
+// --- COMANDOS ---
+
+bot.start((ctx) => {
+  ctx.reply('👋 Bem-vindo ao Bot InspectAI!\n\nPara entender como o bot funciona, digite /ajuda.\n\nPara iniciar uma vistoria agora, digite /setor.');
+});
+
+// Dispara o inicio da Máquina de Estados hierárquica
+bot.command('setor', (ctx) => ctx.scene.enter('SECTOR_WIZARD'));
+
+// Cancela o setor atual e reseta localização
+bot.command('cancelar', (ctx) => {
+  ctx.session.currentLocation = undefined;
+  ctx.session.mediaBuffer = [];
+  ctx.reply('❌ Setor cancelado e buffer esvaziado.\nPara nova vistoria, digite /setor.');
+});
+
+bot.command(['ajuda', 'help'], (ctx) => {
+  const helpText = `📖 *Como o InspectAI funciona:*
+
+1️⃣ *Defina o Setor:* Use o comando /setor para informar a Edificação, Bloco, Pavimento e Sala que você está vistoriando. Isso organiza as fotos automaticamente em pastas no Drive.
+
+2️⃣ *Colete Evidências:* Após definir o setor, você pode enviar fotos:
+• Se enviar uma foto com legenda, a legenda será o comentário daquela evidência.
+• Você também pode enviar mensagens de texto avulsas, que serão salvas como notas de inspeção.
+
+3️⃣ *Sincronize:* Quando terminar de coletar, use o comando /sincronizar.
+• O bot fará o upload das imagens para o Google Drive.
+• Os dados (data, usuário, local e comentário) serão registrados no Google Sheets.
+
+4️⃣ *Cancele ou Resete:* Use /cancelar para limpar o setor atual e as mensagens pendentes na RAM.
+
+💡 *Dica:* O bot mantém o setor na memória até que você o altere ou cancele. Você pode enviar várias fotos e sincronizar tudo no final!
+
+*Comandos:*
+/setor - Define a localização
+/sincronizar - Envia dados para a nuvem
+/cancelar - Limpa o buffer atual
+/ajuda - Mostra esta explicação`;
+
+  ctx.reply(helpText, { parse_mode: 'Markdown' });
+});
+
+bot.command('sincronizar', async (ctx) => {
+  const bufferLength = ctx.session.mediaBuffer.length;
+  
+  if (bufferLength === 0) {
+    return ctx.reply('📭 Não há nenhuma evidência na fila para sincronizar no momento. Envie fotos após escolher um /setor.');
+  }
+
+  const statusMsg = await ctx.reply(`🔄 Resolvendo caminhos do Google Drive (0/${bufferLength})...`);
+
+  try {
+    const rootId = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+    if (!rootId) throw new Error("A variável de ambiente GOOGLE_DRIVE_ROOT_FOLDER_ID está ausente.");
+
+    // No Telegram, message_thread_id identifica Foruns/Tópicos. Resgatamos o title se possuir.
+    let topicName = "Geral";
+    const threadId = ctx.message.message_thread_id; 
+    if (threadId) {
+      topicName = `Topico_${threadId}`;
+    } else if (ctx.chat?.type !== 'private' && (ctx.chat as any)?.title) {
+      topicName = (ctx.chat as any).title;
+    }
+
+    // localLocation armazena a estrutura da ram que vem do Sector Wizard (Bloco / Pav / Sala)
+    const localLocation = ctx.session.currentLocation || "Location Indefinida";
+    const pathArray = [topicName, ...localLocation.split('/')];
+
+    // Constroi iterativamente as Pastas no Drive e obtêm ID final
+    const targetParentFolderId = await resolveLocationPath(pathArray, rootId);
+
+    // Iteração real pelas mídias
+    for(const [index, item] of ctx.session.mediaBuffer.entries()) {
+      await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `🔄 Upando imagem: ${index + 1}/${bufferLength} para o Drive...`);
+
+      let driveUrl = "Sincronizado Apenas Texto";
+
+      // Resolvemos o comentário antes para injetá-lo nos metadados da imagem no Google Drive (Crucial para o Apps Script)
+      const comentario = item.type === 'photo' ? item.caption : (item.text || "");
+
+      // Lida com arquivo visual (Integração Download Stream Telegram -> Upload Stream Drive)
+      if (item.type === 'photo') {
+        const fileLink = await ctx.telegram.getFileLink(item.file_id);
+        const response = await axios.get(fileLink.toString(), { responseType: 'stream' });
+
+        const fileName = `${item.timestamp}_evidencia.jpg`;
+        const driveDescriptionPayload = `${localLocation} | ${topicName} | ${comentario}`;
+
+        driveUrl = await uploadPhotoToDrive(response.data, fileName, targetParentFolderId, driveDescriptionPayload);
+      }
+
+      // Lida com a criação da Linha (Metadata)
+      const dtStr = new Date(item.timestamp * 1000).toISOString();
+      const userName = ctx.from.username || ctx.from.first_name || 'Desconhecido';
+
+      const metadataRow = [
+        dtStr,          // A - Data ISO Horário
+        userName,       // B - User Inspetor
+        localLocation,  // C - Endereço Completo Formatado
+        comentario,     // D - Comentário do UX
+        topicName,      // E - Tópico Origem no Telegram
+        driveUrl        // F - Link Nativo do Google Drive Viewer
+      ];
+
+      // Injeta no Sheet
+      await logToGoogleSheets(metadataRow);
+    }
+
+    // Limpa a RAM (Pense em RNF03 -> Batch executado)
+    ctx.session.mediaBuffer = [];
+    
+    await ctx.telegram.editMessageText(
+      statusMsg.chat.id, 
+      statusMsg.message_id, 
+      undefined, 
+      `✅ \`${bufferLength}\` arquivos processados para a Cloud!\n📊 Metadados logados na planilha com sucesso.\n\nSua sessão local persistirá ativada como:\n\`${localLocation}\``, 
+      { parse_mode: 'Markdown' }
+    );
+
+  } catch(error: any) {
+    console.error("Falha ao subir dados:", error);
+    await ctx.reply(`❌ Ocorreu um erro no processo Cloud: ${error.message}`);
+  }
+});
+
+// --- LISTENER DE EVIDÊNCIAS PASSIVO ---
+
+// Ao receber foto
+bot.on(message('photo'), async (ctx) => {
+  const loc = ctx.session?.currentLocation;
+  if (!loc) {
+    return ctx.reply('⚠️ Você precisa definir o setor antes de enviar evidências!\nDigite o comando /setor.');
+  }
+
+  // Pegar a foto de maior resolução
+  const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+  const caption = ctx.message.caption || '';
+  
+  ctx.session.mediaBuffer.push({
+    type: 'photo',
+    file_id: fileId,
+    caption: caption,
+    timestamp: ctx.message.date,
+    location: loc
+  });
+
+  await ctx.reply('📸 Mídia salva na RAM do InspectAI! (Envie /sincronizar para finalizar)');
+});
+
+// Ao receber texto (que não seja comandos)
+bot.on(message('text'), async (ctx) => {
+  const loc = ctx.session?.currentLocation;
+  if (!loc) {
+    return ctx.reply('⚠️ Você precisa definir o setor antes de enviar comentários/evidências!\nDigite o comando /setor.');
+  }
+
+  ctx.session.mediaBuffer.push({
+    type: 'text',
+    text: ctx.message.text,
+    timestamp: ctx.message.date,
+    location: loc
+  });
+
+  await ctx.reply('💬 Comentário avulso salvo na RAM do InspectAI! (Envie /sincronizar para finalizar)');
+});
+
+// Catch errors gracefully
+bot.catch((err, ctx) => {
+  console.error(`Status Error em ${ctx.updateType}:`, err);
+});

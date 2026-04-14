@@ -1,0 +1,49 @@
+import express from 'express';
+import dotenv from 'dotenv';
+import { bot } from './bot';
+
+dotenv.config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const NODE_ENV = process.env.NODE_ENV || 'development';
+const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
+
+// Rota para o Keep-Alive Bypass do Cold-Start 
+app.get('/ping', (req, res) => {
+  res.status(200).send('Bot Awake!');
+});
+
+// Inicialização de roteamento
+const startServer = async () => {
+  if (NODE_ENV === 'production' && WEBHOOK_DOMAIN) {
+    // Configura endpoint secreto para receber o Push do Telegram
+    const secretPath = `/webhook/${bot.secretPathComponent()}`;
+    
+    app.use(bot.webhookCallback(secretPath));
+    // Informa ao telegram onde enviar as requisições
+    await bot.telegram.setWebhook(`${WEBHOOK_DOMAIN}${secretPath}`);
+    
+    app.listen(PORT, () => {
+      console.log(`🚀 [PROD] Servidor Webhook rodando na porta ${PORT}`);
+      console.log(`🔗 Webhook vinculado a: ${WEBHOOK_DOMAIN}${secretPath}`);
+    });
+    
+  } else {
+    // Configuração para Dev local usando API de polling padrão
+    app.listen(PORT, () => {
+       console.log(`🌟 [DEV] Servidor Local (Express ping) rodando na porta ${PORT}`);
+       console.log(`🚀 Iniciando o Bot via Long-polling...`);
+    });
+    
+    // Deleta webhooks antigos para liberar o long-polling
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
+    bot.launch();
+  }
+
+  // Graceful stop settings
+  process.once('SIGINT', () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+};
+
+startServer().catch(err => console.error("Falha ao iniciar o servidor", err));
