@@ -16,6 +16,16 @@ app.get('/ping', (_req, res) => {
 
 // Inicialização de roteamento
 const startServer = async () => {
+
+  // Registra o menu de comandos visível no Telegram (aparece ao digitar "/")
+  await bot.telegram.setMyCommands([
+    { command: 'start',       description: 'Exibir boas-vindas do InspectAI' },
+    { command: 'setor',       description: 'Definir edificação, bloco, pavimento e sala' },
+    { command: 'sincronizar', description: 'Enviar evidências para o Drive e Sheets' },
+    { command: 'cancelar',    description: 'Limpar setor atual e buffer de evidências' },
+    { command: 'ajuda',       description: 'Mostrar instruções de uso do bot' },
+  ]);
+
   if (NODE_ENV === 'production' && WEBHOOK_DOMAIN) {
     // Configura endpoint secreto para receber o Push do Telegram
     const secretPath = `/webhook/${bot.secretPathComponent()}`;
