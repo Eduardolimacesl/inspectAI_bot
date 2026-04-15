@@ -100,7 +100,7 @@ export const BUILDINGS_CONFIG: LocationNode = {
         "SALA TÉCNICA",
         "ÁREA DE CONVIVÊNCIA"
       ],
-        "Pavimento Tipo": [
+      "1° Pavimento": [
         "A.S. 4", "A.S. 5", "A.S. 6", "A.S. 7", "A.S. 8", "A.S. 9", "A.S. 10", 
         "A.S. 11", "A.S. 12", "A.S. 13", "A.S. 14", "A.S. 15", "A.S. 16", "A.S. 17", 
         "A.S. 18", "A.S. 19", "A.S. 20",
@@ -114,7 +114,27 @@ export const BUILDINGS_CONFIG: LocationNode = {
         "QUARTO 10", "QUARTO 11", "QUARTO 12", "QUARTO 13", "QUARTO 14", "QUARTO 15", 
         "QUARTO 16", "QUARTO 17", "QUARTO 18", "QUARTO 19", "QUARTO 20"
       ],
-      "Cobertura": ["Ala Esquerda", "Ala Central", "Ala Direita", "Barrilete", "CXDG"]
+      "2° Pavimento": [
+        "A.S. 4", "A.S. 5", "A.S. 6", "A.S. 7", "A.S. 8", "A.S. 9", "A.S. 10", 
+        "A.S. 11", "A.S. 12", "A.S. 13", "A.S. 14", "A.S. 15", "A.S. 16", "A.S. 17", 
+        "A.S. 18", "A.S. 19", "A.S. 20",
+        "BANH. 4", "BANH. 5", "BANH. 6", "BANH. 7", "BANH. 8", "BANH. 9", "BANH. 10", 
+        "BANH. 11", "BANH. 12", "BANH. 13", "BANH. 14", "BANH. 15", "BANH. 16", 
+        "BANH. 17", "BANH. 18", "BANH. 19", "BANH. 20",
+        "ESTAR/COZINHA 3", "ESTAR/COZINHA 4", "ESTAR/COZINHA 5", "ESTAR/COZINHA 6", 
+        "ESTAR/COZINHA 7", "ESTAR/COZINHA 8", "ESTAR/COZINHA 9", "ESTAR/COZINHA 20",
+        "HALL DE ENTRADA",
+        "QUARTO 4", "QUARTO 5", "QUARTO 6", "QUARTO 7", "QUARTO 8", "QUARTO 9", 
+        "QUARTO 10", "QUARTO 11", "QUARTO 12", "QUARTO 13", "QUARTO 14", "QUARTO 15", 
+        "QUARTO 16", "QUARTO 17", "QUARTO 18", "QUARTO 19", "QUARTO 20"
+      ],
+      "Cobertura": [
+        "Ala Esquerda", 
+        "Ala Central", 
+        "Ala Direita", 
+        "Barrilete", 
+        "CXDG"
+      ]
     }
   },
   "BAFZ": {
