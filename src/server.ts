@@ -54,7 +54,23 @@ const startServer = async () => {
     
     // Deleta webhooks antigos para liberar o long-polling
     await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    bot.launch();
+
+    // Loop de retry para contornar o 409 Conflict do Render (sobreposição temporária de containers)
+    const launchWithRetry = async (retries = 5, delay = 3000) => {
+      try {
+        await bot.launch();
+        console.log(`✅ Conectado ao Telegram via Long-polling!`);
+      } catch (err: any) {
+        if (err.response && err.response.error_code === 409 && retries > 0) {
+          console.warn(`⏳ [409 Conflict] Outra instância está rodando. O container antigo ainda não desligou. Retentando em ${delay / 1000}s... (${retries} tentativas restantes)`);
+          setTimeout(() => launchWithRetry(retries - 1, delay), delay);
+        } else {
+          console.error('❌ Falha fatal ao iniciar o bot via polling:', err);
+          process.exit(1);
+        }
+      }
+    };
+    launchWithRetry();
   }
 
   // Graceful stop settings
