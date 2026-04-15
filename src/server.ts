@@ -9,9 +9,10 @@ const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 
-// ✅ Endpoint keep-alive - chamado pelo Apps Script a cada 5 min
+// ✅ Endpoint keep-alive - chamado pelo UptimeRobot a cada 5 min
 app.get('/ping', (_req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+  console.log(res)
 });
 
 // Inicialização de roteamento
