@@ -170,7 +170,7 @@ bot.on(message('photo'), async (ctx) => {
 
   // Pegar a foto de maior resolução
   const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-  const caption = ctx.message.caption || '';
+  const caption = (ctx.message as any).caption || '';
   
   ctx.session.mediaBuffer.push({
     type: 'photo',
