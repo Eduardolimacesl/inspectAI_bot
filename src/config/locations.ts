@@ -67,7 +67,7 @@ export const BUILDINGS_CONFIG: LocationNode = {
       "Cobertura": ["Setor A", "Setor B", "Setor C"]
     },
     "Bloco de Alojamentos": {
-      "Pavimento Térreo": [
+      "TÉRREO": [
         "APARTAMENTO PCD 1",
         "APARTAMENTO PCD 2",
         "CICLOVIA",

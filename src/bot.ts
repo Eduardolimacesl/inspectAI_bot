@@ -2,8 +2,10 @@ import { Telegraf, session, Scenes } from 'telegraf';
 import { message } from 'telegraf/filters';
 import dotenv from 'dotenv';
 import axios from 'axios';
-import { resolveLocationPath, uploadPhotoToDrive, logToGoogleSheets } from './services/google';
+import { resolveLocationPath, uploadPhotoToDrive, readDriveJson, writeDriveJson, findOrCreateSpreadsheet, findOrCreateSheetTab, appendToSheetTab } from './services/google';
+import { analyzeInspectionPhoto } from './services/analysisAi';
 import sectorWizard, { MyBotContext } from './scenes/sectorWizard';
+import stream from 'stream';
 
 dotenv.config();
 
@@ -89,7 +91,7 @@ bot.command('sincronizar', async (ctx) => {
     const rootId = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
     if (!rootId) throw new Error("A variável de ambiente GOOGLE_DRIVE_ROOT_FOLDER_ID está ausente.");
 
-    // No Telegram, message_thread_id identifica Foruns/Tópicos. Resgatamos o title se possuir.
+    // Resolução de nomes e tópicos
     let topicName = "Geral";
     const threadId = ctx.message.message_thread_id; 
     if (threadId) {
@@ -98,59 +100,106 @@ bot.command('sincronizar', async (ctx) => {
       topicName = (ctx.chat as any).title;
     }
 
-    // localLocation armazena a estrutura da ram que vem do Sector Wizard (Bloco / Pav / Sala)
-    const localLocation = ctx.session.currentLocation || "Location Indefinida";
-    const pathArray = [topicName, ...localLocation.split('/')];
+    // Pasta do Tópico (Edificação)
+    const topicFolderId = await resolveLocationPath([topicName], rootId);
+    
+    // Planilha da Edificação
+    const spreadsheetName = `Vistoria_${topicName}`;
+    const spreadsheetId = await findOrCreateSpreadsheet(spreadsheetName, topicFolderId);
 
-    // Constroi iterativamente as Pastas no Drive e obtêm ID final
-    const targetParentFolderId = await resolveLocationPath(pathArray, rootId);
+    // Iteração real pelas mídias (removendo 1 a 1 em caso de erro para evitar upload duplicado)
+    const clonedBuffer = [...ctx.session.mediaBuffer];
+    for (let index = 0; index < clonedBuffer.length; index++) {
+      const item = clonedBuffer[index];
+      const currentStep = `(${index + 1}/${bufferLength})`;
+      
+      await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `🔄 ${currentStep} Processando evidência...`);
 
-    // Iteração real pelas mídias
-    for(const [index, item] of ctx.session.mediaBuffer.entries()) {
-      await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `🔄 Upando imagem: ${index + 1}/${bufferLength} para o Drive...`);
+      const localLocation = item.location || "Indefinida";
+      const locationParts = localLocation.split('/');
+      const sectorName = locationParts[locationParts.length - 1].trim();
+      
+      // Pasta do Setor (dentro da Edificação)
+      const sectorFolderId = await resolveLocationPath(locationParts, topicFolderId);
 
       let driveUrl = "Sincronizado Apenas Texto";
-
-      // Resolvemos o comentário antes para injetá-lo nos metadados da imagem no Google Drive (Crucial para o Apps Script)
+      let driveFileId = "";
+      let aiAnalysis = null;
       const comentario = item.type === 'photo' ? item.caption : (item.text || "");
 
-      // Lida com arquivo visual (Integração Download Stream Telegram -> Upload Stream Drive)
       if (item.type === 'photo') {
+        // 1. Download e Análise IA
+        await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `🧠 ${currentStep} Analisando com Gemini IA...`);
         const fileLink = await ctx.telegram.getFileLink(item.file_id);
-        const response = await axios.get(fileLink.toString(), { responseType: 'stream' });
+        const response = await axios.get(fileLink.toString(), { responseType: 'arraybuffer' });
+        const buffer = Buffer.from(response.data);
+        
+        // Chamada assíncrona para o Gemini
+        aiAnalysis = await analyzeInspectionPhoto(buffer, comentario);
 
+        // 2. Upload para Drive
+        await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `📤 ${currentStep} Fazendo upload para o Drive...`);
         const fileName = `${item.timestamp}_evidencia.jpg`;
         const driveDescriptionPayload = `${localLocation} | ${topicName} | ${comentario}`;
-
-        driveUrl = await uploadPhotoToDrive(response.data, fileName, targetParentFolderId, driveDescriptionPayload);
+        
+        const readable = new stream.PassThrough();
+        readable.end(buffer);
+        
+        const uploadResult = await uploadPhotoToDrive(readable, fileName, sectorFolderId, driveDescriptionPayload);
+        driveUrl = uploadResult.driveUrl;
+        driveFileId = uploadResult.fileId;
       }
 
-      // Lida com a criação da Linha (Metadata)
-      const dtStr = new Date(item.timestamp * 1000).toISOString();
+      // 3. Registro no JSON de Metadados do Setor
+      await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `💾 ${currentStep} Atualizando metadados JSON...`);
+      const metadataRecords = await readDriveJson(sectorFolderId, "metadata.json");
       const userName = ctx.from.username || ctx.from.first_name || 'Desconhecido';
+      const dtStr = new Date(item.timestamp * 1000).toISOString();
 
-      const metadataRow = [
-        dtStr,          // A - Data ISO Horário
-        userName,       // B - User Inspetor
-        localLocation,  // C - Endereço Completo Formatado
-        comentario,     // D - Comentário do UX
-        topicName,      // E - Tópico Origem no Telegram
-        driveUrl        // F - Link Nativo do Google Drive Viewer
+      const newRecord = {
+        fileName: item.type === 'photo' ? `${item.timestamp}_evidencia.jpg` : 'nota.txt',
+        driveFileId,
+        driveUrl,
+        timestamp: dtStr,
+        inspector: userName,
+        location: localLocation,
+        inspectorComment: comentario,
+        aiAnalysis: aiAnalysis || "Análise indisponível"
+      };
+
+      metadataRecords.unshift(newRecord); // Novo registro no topo
+      await writeDriveJson(sectorFolderId, "metadata.json", metadataRecords);
+
+      // 4. Registro no Google Sheets (Aba do Setor)
+      await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `📊 ${currentStep} Registrando na planilha...`);
+      const tabName = await findOrCreateSheetTab(spreadsheetId, sectorName);
+      
+      const aiCommentStr = aiAnalysis 
+        ? `CRITICIDADE: ${aiAnalysis.criticidade} | FALHA: ${aiAnalysis.falha} | DIRETRIZ: ${aiAnalysis.diretriz}`
+        : "N/A";
+
+      const sheetRow = [
+        dtStr,
+        userName,
+        newRecord.fileName,
+        driveUrl,
+        comentario,
+        aiCommentStr
       ];
 
-      // Injeta no Sheet
-      await logToGoogleSheets(metadataRow);
+      await appendToSheetTab(spreadsheetId, tabName, sheetRow);
+
+      // Remove com segurança o item processado da sessão original
+      ctx.session.mediaBuffer.shift();
     }
 
-    // Limpa a RAM (Pense em RNF03 -> Batch executado)
-    ctx.session.mediaBuffer = [];
     
     await ctx.telegram.editMessageText(
       statusMsg.chat.id, 
       statusMsg.message_id, 
       undefined, 
-      `✅ \`${bufferLength}\` arquivos processados para a Cloud!\n📊 Metadados logados na planilha com sucesso.\n\nSua sessão local persistirá ativada como:\n\`${localLocation}\``, 
-      { parse_mode: 'Markdown' }
+      `✅ \`${bufferLength}\` arquivos sincronizados e analisados!\n\n📂 **Pasta do Tópico:** [Acessar](https://drive.google.com/drive/folders/${topicFolderId})\n📊 **Planilha:** [Acessar](https://docs.google.com/spreadsheets/d/${spreadsheetId})\n\nSua sessão em \`${ctx.session.currentLocation}\` continua ativa.`, 
+      { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } }
     );
 
   } catch(error: any) {

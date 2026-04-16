@@ -1,6 +1,7 @@
 import { google, drive_v3, sheets_v4 } from 'googleapis';
 import dotenv from 'dotenv';
 import stream from 'stream';
+import axios from 'axios';
 
 dotenv.config();
 
@@ -59,10 +60,23 @@ export async function findFolder(folderName: string, parentId: string): Promise<
   return null;
 }
 
-/**
- * Creates a folder inside a parent folder. Returns the new folder ID.
- */
 export async function createFolder(folderName: string, parentId: string): Promise<string> {
+  if (process.env.APPS_SCRIPT_WEBHOOK_URL) {
+    try {
+      const res = await axios.post(process.env.APPS_SCRIPT_WEBHOOK_URL, {
+        action: 'createFolder',
+        parentId: parentId,
+        folderName: folderName
+      });
+      if (res.data && res.data.status === 'success') {
+        return res.data.folderId;
+      }
+    } catch (err: any) {
+      console.warn("⚠️ Falha ao criar pasta via Webhook, tentando fallback...", err.message);
+    }
+  }
+
+  // --- TRADICIONAL SERVICE ACCOUNT (Fallback) ---
   initGoogleServices();
   if (!driveService) throw new Error("Drive service disconnected.");
 
@@ -98,12 +112,6 @@ export async function resolveLocationPath(pathArray: string[], rootId: string): 
    return currentParent;
 }
 
-/**
- * Uploads a readable stream to Google Drive inside parentId.
- * Adicionado suporte ao WebHook (Apps Script Proxy) para contornar cota de Storage de Service Accounts.
- */
-import axios from 'axios';
-
 async function streamToBase64(stream: stream.Readable): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: any[] = [];
@@ -113,60 +121,207 @@ async function streamToBase64(stream: stream.Readable): Promise<string> {
   });
 }
 
-export async function uploadPhotoToDrive(fileStream: stream.Readable, fileName: string, parentId: string, itemDescription: string): Promise<string> {
-   
-   // --- IMPLEMENTAÇÃO PONTE-WEBHOOK (Bypass de cota 15GB Gmail Gratuito) ---
-   if (process.env.APPS_SCRIPT_WEBHOOK_URL) {
-     const base64Data = await streamToBase64(fileStream);
-     const res = await axios.post(process.env.APPS_SCRIPT_WEBHOOK_URL, {
-       parentId: parentId,
-       fileName: fileName,
-       base64Data: base64Data,
-       description: itemDescription
-     });
+/**
+ * Uploads a readable stream to Google Drive. Usa o Webhook do Apps Script para contornar cota de Service Account.
+ */
+export async function uploadPhotoToDrive(
+  fileStream: stream.Readable, 
+  fileName: string, 
+  parentId: string, 
+  itemDescription: string
+): Promise<{ driveUrl: string; fileId: string }> {
 
-     if (res.data && res.data.status === 'success') {
-       return res.data.url;
-     } else {
-       throw new Error(`Erro no Webhook: ${res.data.message}`);
-     }
-   }
-   
-   // --- IMPLEMENTAÇÃO TRADICIONAL SERVICE ACCOUNT ---
-   initGoogleServices();
-   if (!driveService) throw new Error("Drive service disconnected.");
+  if (process.env.APPS_SCRIPT_WEBHOOK_URL) {
+    const base64Data = await streamToBase64(fileStream);
+    const res = await axios.post(process.env.APPS_SCRIPT_WEBHOOK_URL, {
+      parentId: parentId,
+      fileName: fileName,
+      base64Data: base64Data,
+      description: itemDescription
+    });
 
-   const res = await driveService.files.create({
-       requestBody: {
-           name: fileName,
-           parents: [parentId],
-           description: itemDescription
-       },
-       media: {
-           body: fileStream // Fallback original
-       },
-       fields: 'id, webViewLink'
-   });
+    if (res.data && res.data.status === 'success') {
+      return {
+        driveUrl: res.data.url || '',
+        fileId: res.data.id || '' // Assuming your apps script returns id now, adjust later if needed.
+      };
+    } else {
+      throw new Error(`Erro no Webhook: ${res.data.message}`);
+    }
+  }
 
-   return res.data.webViewLink || res.data.id || '';
+  // --- IMPLEMENTAÇÃO TRADICIONAL SERVICE ACCOUNT (Fallback) ---
+  initGoogleServices();
+  if (!driveService) throw new Error("Drive service disconnected.");
+
+  const res = await driveService.files.create({
+      requestBody: {
+          name: fileName,
+          parents: [parentId],
+          description: itemDescription
+      },
+      media: {
+          body: fileStream
+      },
+      fields: 'id, webViewLink'
+  });
+
+  return {
+    driveUrl: res.data.webViewLink || '',
+    fileId: res.data.id || ''
+  };
 }
 
 /**
- * Appends a row of metadata to Google Sheets.
+ * Lê um arquivo JSON do Drive.
  */
-export async function logToGoogleSheets(metadataRow: any[]): Promise<void> {
-   initGoogleServices();
-   if (!sheetsService) throw new Error("Sheets service disconnected.");
-   
-   const sheetId = process.env.GOOGLE_SHEET_ID;
-   if (!sheetId) throw new Error("GOOGLE_SHEET_ID missing.");
+export async function readDriveJson(folderId: string, fileName: string): Promise<any[]> {
+  initGoogleServices();
+  if (!driveService) throw new Error("Drive service disconnected.");
 
-   await sheetsService.spreadsheets.values.append({
-       spreadsheetId: sheetId,
-       range: 'A:Z', // General range to let Sheets resolve the next empty row
-       valueInputOption: 'USER_ENTERED',
-       requestBody: {
-           values: [metadataRow]
-       }
-   });
+  try {
+    const query = `name = '${fileName}' and '${folderId}' in parents and trashed = false`;
+    const res = await driveService.files.list({
+      q: query,
+      fields: 'files(id)',
+      spaces: 'drive'
+    });
+
+    if (res.data.files && res.data.files.length > 0) {
+      const fileId = res.data.files[0].id!;
+      const content = await driveService.files.get({
+        fileId: fileId,
+        alt: 'media'
+      });
+      return content.data as any[];
+    }
+  } catch (error) {
+    console.error(`⚠️ Erro ao ler JSON ${fileName}:`, error);
+  }
+  return [];
+}
+
+/**
+ * Salva um arquivo JSON no Drive (sobrescreve se existir).
+ */
+export async function writeDriveJson(folderId: string, fileName: string, data: any[]): Promise<void> {
+  if (process.env.APPS_SCRIPT_WEBHOOK_URL) {
+    await axios.post(process.env.APPS_SCRIPT_WEBHOOK_URL, {
+      action: 'writeJson',
+      parentId: folderId,
+      fileName: fileName,
+      jsonContent: JSON.stringify(data, null, 2)
+    });
+    return;
+  }
+
+  // --- TRADICIONAL SERVICE ACCOUNT (Fallback) ---
+  initGoogleServices();
+  if (!driveService) throw new Error("Drive service disconnected.");
+
+  try {
+    const query = `name = '${fileName}' and '${folderId}' in parents and trashed = false`;
+    const listRes = await driveService.files.list({ q: query, fields: 'files(id)' });
+
+    const media = {
+      mimeType: 'application/json',
+      body: JSON.stringify(data, null, 2)
+    };
+
+    if (listRes.data.files && listRes.data.files.length > 0) {
+      await driveService.files.update({
+        fileId: listRes.data.files[0].id!,
+        media: media
+      });
+    } else {
+      await driveService.files.create({
+        requestBody: { name: fileName, parents: [folderId], mimeType: 'application/json' },
+        media: media
+      });
+    }
+  } catch (error) {
+    console.error(`❌ Erro ao escrever JSON ${fileName}:`, error);
+  }
+}
+
+/**
+ * Busca ou cria uma planilha na pasta especificada.
+ */
+export async function findOrCreateSpreadsheet(name: string, parentId: string): Promise<string> {
+  initGoogleServices();
+  if (!driveService) throw new Error("Drive service disconnected.");
+
+  const query = `name = '${name}' and '${parentId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`;
+  const res = await driveService.files.list({ q: query, fields: 'files(id)' });
+
+  if (res.data.files && res.data.files.length > 0) {
+    return res.data.files[0].id!;
+  }
+
+  // --- CRIAÇÃO ---
+  if (process.env.APPS_SCRIPT_WEBHOOK_URL) {
+    const createRes = await axios.post(process.env.APPS_SCRIPT_WEBHOOK_URL, {
+      action: 'createSpreadsheet',
+      parentId: parentId,
+      fileName: name
+    });
+    if (createRes.data && createRes.data.status === 'success') {
+      return createRes.data.fileId;
+    }
+  }
+
+  // Fallback para Service Account
+  const newSheet = await driveService.files.create({
+    requestBody: {
+      name: name,
+      parents: [parentId],
+      mimeType: 'application/vnd.google-apps.spreadsheet'
+    },
+    fields: 'id'
+  });
+
+  return newSheet.data.id!;
+}
+
+/**
+ * Busca ou cria uma aba específica dentro de uma planilha.
+ */
+export async function findOrCreateSheetTab(spreadsheetId: string, tabName: string): Promise<string> {
+  initGoogleServices();
+  if (!sheetsService) throw new Error("Sheets service disconnected.");
+
+  const res = await sheetsService.spreadsheets.get({ spreadsheetId });
+  const sheet = res.data.sheets?.find(s => s.properties?.title === tabName);
+
+  if (sheet) return tabName;
+
+  await sheetsService.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [{
+        addSheet: {
+          properties: { title: tabName }
+        }
+      }]
+    }
+  });
+
+  return tabName;
+}
+
+/**
+ * Adiciona uma linha de dados em uma aba específica.
+ */
+export async function appendToSheetTab(spreadsheetId: string, tabName: string, row: any[]): Promise<void> {
+  initGoogleServices();
+  if (!sheetsService) throw new Error("Sheets service disconnected.");
+
+  await sheetsService.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${tabName}!A:Z`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: {
+      values: [row]
+    }
+  });
 }

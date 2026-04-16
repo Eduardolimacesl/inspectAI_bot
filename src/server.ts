@@ -1,6 +1,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import { bot } from './bot';
+import { startKeepAlive } from './utils/keepAlive';
 
 dotenv.config();
 
@@ -9,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const WEBHOOK_DOMAIN = process.env.WEBHOOK_DOMAIN;
 
-// ✅ Endpoint keep-alive - chamado a cada 5 min pelo Apps Script / UptimeRobot
+// ✅ Endpoint keep-alive - chamado a cada 5 min pelo UptimeRobot
 app.get('/ping', (_req, res) => {
   const timestamp = new Date().toISOString();
   const uptimeSec = Math.floor(process.uptime());
@@ -43,6 +44,8 @@ const startServer = async () => {
     app.listen(PORT, () => {
       console.log(`🚀 [PROD] Servidor Webhook rodando na porta ${PORT}`);
       console.log(`🔗 Webhook vinculado a: ${WEBHOOK_DOMAIN}${secretPath}`);
+      
+      startKeepAlive();
     });
     
   } else {
