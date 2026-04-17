@@ -13,6 +13,8 @@
 ## 📋 Índice
 
 - [Visão Geral](#visão-geral)
+- [Funcionalidades Implementadas](#funcionalidades-implementadas)
+- [Futuras Implementações](#futuras-implementações)
 - [Fluxo de Uso](#fluxo-de-uso)
 - [Comandos Disponíveis](#comandos-disponíveis)
 - [Arquitetura](#arquitetura)
@@ -33,6 +35,29 @@ O **InspectAI Bot** é o módulo de coleta de dados do ecossistema InspectAI. El
 3. **Sincronizem tudo** com um único comando, realizando upload para o Google Drive e logging no Google Sheets
 
 Os dados ficam armazenados em **memória de sessão (RAM)** durante a coleta e são persistidos na nuvem apenas no momento da sincronização, seguindo um padrão de **batch local-first**.
+
+---
+
+## ✨ Funcionalidades Implementadas
+
+- [x] Integração com Telegram (Telegraf) com suporte a grupos e tópicos.
+- [x] Menu interativo de seleção de setor (WizardScene).
+- [x] Sincronização em batch local-first (estado em RAM).
+- [x] Análise de imagens via Inteligência Artificial (Gemini) para avaliar criticidade, falha e diretriz.
+- [x] Integração com Google Drive (criação hierárquica de pastas).
+- [x] Integração de metadados e evidências em Google Sheets.
+- [x] Arquitetura dual-mode (Long Polling para dev, Webhook para prod).
+- [x] Endpoint de Keep-Alive para evitar hibernação.
+
+---
+
+## 🚀 Futuras Implementações
+
+- [ ] Comando `/fotos_dia` para visualização e download diário de imagens capturadas.
+- [ ] Otimização e limpeza automática no Google Drive para gerenciar cota de espaço.
+- [ ] Suporte à gravação e transcrição de áudios e vídeos como evidências.
+- [ ] Exportação automatizada de relatórios de vistoria em PDF.
+- [ ] Controle de acesso e permissões baseadas em usuários autenticados.
 
 ---
 

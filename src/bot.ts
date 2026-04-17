@@ -2,10 +2,13 @@ import { Telegraf, session, Scenes } from 'telegraf';
 import { message } from 'telegraf/filters';
 import dotenv from 'dotenv';
 import axios from 'axios';
+import dns from 'dns';
 import { resolveLocationPath, uploadPhotoToDrive, readDriveJson, writeDriveJson, findOrCreateSpreadsheet, findOrCreateSheetTab, appendToSheetTab } from './services/google';
 import { analyzeInspectionPhoto } from './services/analysisAi';
 import sectorWizard, { MyBotContext } from './scenes/sectorWizard';
 import stream from 'stream';
+
+dns.setDefaultResultOrder('ipv4first');
 
 dotenv.config();
 
@@ -65,12 +68,15 @@ bot.command(['ajuda', 'help'], (ctx) => {
 • O bot fará o upload das imagens para o Google Drive.
 • Os dados (data, usuário, local e comentário) serão registrados no Google Sheets.
 
-4️⃣ *Cancele ou Resete:* Use /cancelar para limpar o setor atual e as mensagens pendentes na RAM.
+4️⃣ *Re-inspeção:* Use /reinspecao para entrar no modo de correção. A IA comparará a nova foto com a anterior para fechar o ciclo de falha.
+
+5️⃣ *Cancele ou Resete:* Use /cancelar para limpar o setor atual e as mensagens pendentes na RAM.
 
 💡 *Dica:* O bot mantém o setor na memória até que você o altere ou cancele. Você pode enviar várias fotos e sincronizar tudo no final!
 
 *Comandos:*
 /setor - Define a localização
+/reinspecao - Alterna modo de re-inspeção (Correção)
 /sincronizar - Envia dados para a nuvem
 /cancelar - Limpa o buffer atual
 /ajuda - Mostra esta explicação`;
@@ -78,11 +84,23 @@ bot.command(['ajuda', 'help'], (ctx) => {
   ctx.reply(helpText, { parse_mode: 'Markdown' });
 });
 
+bot.command('reinspecao', (ctx) => {
+  ctx.session.reinspectionMode = !ctx.session.reinspectionMode;
+  const status = ctx.session.reinspectionMode ? "ATIVADO ✅" : "DESATIVADO ❌";
+  ctx.reply(`🔄 **Modo Re-inspeção:** ${status}\n\n${ctx.session.reinspectionMode ? "Envie fotos da CORREÇÃO do problema. Elas serão marcadas como evidência de fechamento." : "Voltando ao modo de inspeção normal (identificação de novas falhas)."}`);
+});
+
 bot.command('sincronizar', async (ctx) => {
   const bufferLength = ctx.session.mediaBuffer.length;
   
   if (bufferLength === 0) {
-    return ctx.reply('📭 Não há nenhuma evidência na fila para sincronizar no momento. Envie fotos após escolher um /setor.');
+    return ctx.reply('📭 Não há nenhuma evidência na fila para sincronizar no momento. Envie fotos ou use /setor.');
+  }
+
+  // Verifica se há itens sem localização (Modo Lote pendente)
+  const pendingSectors = ctx.session.mediaBuffer.filter(item => !item.location);
+  if (pendingSectors.length > 0) {
+    return ctx.reply(`⚠️ Você tem ${pendingSectors.length} itens aguardando a definição de um setor.\nUse o comando /setor para definir o destino antes de sincronizar.`);
   }
 
   const statusMsg = await ctx.reply(`🔄 Resolvendo caminhos do Google Drive (0/${bufferLength})...`);
@@ -131,7 +149,10 @@ bot.command('sincronizar', async (ctx) => {
         // 1. Download e Análise IA
         await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `🧠 ${currentStep} Analisando com Gemini IA...`);
         const fileLink = await ctx.telegram.getFileLink(item.file_id);
-        const response = await axios.get(fileLink.toString(), { responseType: 'arraybuffer' });
+        const response = await axios.get(fileLink.toString(), { 
+          responseType: 'arraybuffer',
+          timeout: 30000 // 30 segundos
+        });
         const buffer = Buffer.from(response.data);
         
         // Chamada assíncrona para o Gemini
@@ -184,7 +205,10 @@ bot.command('sincronizar', async (ctx) => {
         newRecord.fileName,
         driveUrl,
         comentario,
-        aiCommentStr
+        aiCommentStr,
+        driveFileId,
+        localLocation,
+        item.isReinspection ? "RE-INSPEÇÃO" : "ORIGINAL"
       ];
 
       await appendToSheetTab(spreadsheetId, tabName, sheetRow);
@@ -213,10 +237,7 @@ bot.command('sincronizar', async (ctx) => {
 // Ao receber foto
 bot.on(message('photo'), async (ctx) => {
   const loc = ctx.session?.currentLocation;
-  if (!loc) {
-    return ctx.reply('⚠️ Você precisa definir o setor antes de enviar evidências!\nDigite o comando /setor.');
-  }
-
+  
   // Pegar a foto de maior resolução
   const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
   const caption = (ctx.message as any).caption || '';
@@ -225,28 +246,35 @@ bot.on(message('photo'), async (ctx) => {
     type: 'photo',
     file_id: fileId,
     caption: caption,
-    timestamp: ctx.message.date,
-    location: loc
+    timestamp: (ctx.message as any).forward_date || ctx.message.date,
+    location: loc, // Pode ser undefined (Modo Lote)
+    isReinspection: ctx.session.reinspectionMode || false
   });
 
-  await ctx.reply('📸 Mídia salva na RAM do InspectAI! (Envie /sincronizar para finalizar)');
+  if (!loc) {
+    await ctx.reply('📦 **Mídia salva em Modo Lote!**\nVocê ainda não definiu um setor. Envie /setor para dar um destino a esta e outras fotos pendentes.');
+  } else {
+    await ctx.reply(`📸 Mídia salva para o setor: \`${loc}\`\n(Envie /sincronizar para finalizar)`);
+  }
 });
 
 // Ao receber texto (que não seja comandos)
 bot.on(message('text'), async (ctx) => {
   const loc = ctx.session?.currentLocation;
-  if (!loc) {
-    return ctx.reply('⚠️ Você precisa definir o setor antes de enviar comentários/evidências!\nDigite o comando /setor.');
-  }
-
+  
   ctx.session.mediaBuffer.push({
     type: 'text',
     text: ctx.message.text,
     timestamp: ctx.message.date,
-    location: loc
+    location: loc, // Pode ser undefined
+    isReinspection: ctx.session.reinspectionMode || false
   });
 
-  await ctx.reply('💬 Comentário avulso salvo na RAM do InspectAI! (Envie /sincronizar para finalizar)');
+  if (!loc) {
+    await ctx.reply('📦 **Comentário salvo em Modo Lote!**\nLembre-se de definir o /setor antes de sincronizar.');
+  } else {
+    await ctx.reply('💬 Comentário avulso salvo na RAM!');
+  }
 });
 
 // Catch errors gracefully

@@ -106,8 +106,23 @@ const sectorWizard = new Scenes.WizardScene<MyBotContext>(
         const finalLocation = [...path, selectedOption].join('/');
         ctx.session.currentLocation = finalLocation;
         
+        // Aplica o setor a mídias pendentes (Modo Lote)
+        let updatedCount = 0;
+        if (ctx.session.mediaBuffer) {
+          ctx.session.mediaBuffer.forEach(item => {
+            if (!item.location) {
+              item.location = finalLocation;
+              updatedCount++;
+            }
+          });
+        }
+
+        const batchMsg = updatedCount > 0 
+          ? `\n\n📦 **Modo Lote:** O setor foi aplicado a \`${updatedCount}\` mídias que estavam pendentes.` 
+          : "";
+
         await ctx.editMessageText(
-          `✅ **Setor Configurado com Sucesso!**\n\n📌 Local: \`${finalLocation}\`\n\n📷 Agora envie fotos ou comentários. Use /sincronizar para finalizar a vistoria.`,
+          `✅ **Setor Configurado com Sucesso!**\n\n📌 Local: \`${finalLocation}\`${batchMsg}\n\n📷 Agora envie fotos ou comentários. Use /sincronizar para finalizar a vistoria.`,
           { parse_mode: 'Markdown' }
         );
         return ctx.scene.leave();
