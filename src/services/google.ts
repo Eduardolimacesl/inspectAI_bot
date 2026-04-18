@@ -173,78 +173,6 @@ export async function uploadPhotoToDrive(
 }
 
 /**
- * Lê um arquivo JSON do Drive.
- */
-export async function readDriveJson(folderId: string, fileName: string): Promise<any[]> {
-  initGoogleServices();
-  if (!driveService) throw new Error("Drive service disconnected.");
-
-  try {
-    const query = `name = '${fileName}' and '${folderId}' in parents and trashed = false`;
-    const res = await driveService.files.list({
-      q: query,
-      fields: 'files(id)',
-      spaces: 'drive'
-    });
-
-    if (res.data.files && res.data.files.length > 0) {
-      const fileId = res.data.files[0].id!;
-      const content = await driveService.files.get({
-        fileId: fileId,
-        alt: 'media'
-      });
-      return content.data as any[];
-    }
-  } catch (error) {
-    console.error(`⚠️ Erro ao ler JSON ${fileName}:`, error);
-  }
-  return [];
-}
-
-/**
- * Salva um arquivo JSON no Drive (sobrescreve se existir).
- */
-export async function writeDriveJson(folderId: string, fileName: string, data: any[]): Promise<void> {
-  if (process.env.APPS_SCRIPT_WEBHOOK_URL) {
-    await axios.post(process.env.APPS_SCRIPT_WEBHOOK_URL, {
-      action: 'writeJson',
-      parentId: folderId,
-      fileName: fileName,
-      jsonContent: JSON.stringify(data, null, 2)
-    });
-    return;
-  }
-
-  // --- TRADICIONAL SERVICE ACCOUNT (Fallback) ---
-  initGoogleServices();
-  if (!driveService) throw new Error("Drive service disconnected.");
-
-  try {
-    const query = `name = '${fileName}' and '${folderId}' in parents and trashed = false`;
-    const listRes = await driveService.files.list({ q: query, fields: 'files(id)' });
-
-    const media = {
-      mimeType: 'application/json',
-      body: JSON.stringify(data, null, 2)
-    };
-
-    if (listRes.data.files && listRes.data.files.length > 0) {
-      await driveService.files.update({
-        fileId: listRes.data.files[0].id!,
-        media: media
-      });
-    } else {
-      await driveService.files.create({
-        requestBody: { name: fileName, parents: [folderId], mimeType: 'application/json' },
-        media: media
-      });
-    }
-  } catch (error) {
-    console.error(`❌ Erro ao escrever JSON ${fileName}:`, error);
-  }
-}
-
-/**
  * Busca ou cria uma planilha na pasta especificada.
  */
 export async function findOrCreateSpreadsheet(name: string, parentId: string): Promise<string> {
@@ -310,9 +238,9 @@ export async function findOrCreateSheetTab(spreadsheetId: string, tabName: strin
 }
 
 /**
- * Adiciona uma linha de dados em uma aba específica.
+ * Adiciona múltiplas linhas de dados em uma aba específica em uma única chamada.
  */
-export async function appendToSheetTab(spreadsheetId: string, tabName: string, row: any[]): Promise<void> {
+export async function appendToSheetTab(spreadsheetId: string, tabName: string, rows: any[][]): Promise<void> {
   initGoogleServices();
   if (!sheetsService) throw new Error("Sheets service disconnected.");
 
@@ -321,7 +249,7 @@ export async function appendToSheetTab(spreadsheetId: string, tabName: string, r
     range: `${tabName}!A:Z`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
-      values: [row]
+      values: rows
     }
   });
 }

@@ -3,7 +3,7 @@ import { message } from 'telegraf/filters';
 import dotenv from 'dotenv';
 import axios from 'axios';
 import dns from 'dns';
-import { resolveLocationPath, uploadPhotoToDrive, readDriveJson, writeDriveJson, findOrCreateSpreadsheet, findOrCreateSheetTab, appendToSheetTab } from './services/google';
+import { resolveLocationPath, uploadPhotoToDrive, findOrCreateSpreadsheet, findOrCreateSheetTab, appendToSheetTab } from './services/google';
 import { analyzeInspectionPhoto } from './services/analysisAi';
 import sectorWizard, { MyBotContext } from './scenes/sectorWizard';
 import stream from 'stream';
@@ -103,7 +103,8 @@ bot.command('sincronizar', async (ctx) => {
     return ctx.reply(`⚠️ Você tem ${pendingSectors.length} itens aguardando a definição de um setor.\nUse o comando /setor para definir o destino antes de sincronizar.`);
   }
 
-  const statusMsg = await ctx.reply(`🔄 Resolvendo caminhos do Google Drive (0/${bufferLength})...`);
+  const startTime = Date.now();
+  const statusMsg = await ctx.reply(`🚀 Iniciando sincronização de ${bufferLength} itens...`);
 
   try {
     const rootId = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
@@ -118,117 +119,115 @@ bot.command('sincronizar', async (ctx) => {
       topicName = (ctx.chat as any).title;
     }
 
-    // Pasta do Tópico (Edificação)
     const topicFolderId = await resolveLocationPath([topicName], rootId);
-    
-    // Planilha da Edificação
     const spreadsheetName = `Vistoria_${topicName}`;
     const spreadsheetId = await findOrCreateSpreadsheet(spreadsheetName, topicFolderId);
 
-    // Iteração real pelas mídias (removendo 1 a 1 em caso de erro para evitar upload duplicado)
-    const clonedBuffer = [...ctx.session.mediaBuffer];
-    for (let index = 0; index < clonedBuffer.length; index++) {
-      const item = clonedBuffer[index];
-      const currentStep = `(${index + 1}/${bufferLength})`;
-      
-      await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `🔄 ${currentStep} Processando evidência...`);
-
-      const localLocation = item.location || "Indefinida";
-      const locationParts = localLocation.split('/');
-      const sectorName = locationParts[locationParts.length - 1].trim();
-      
-      // Pasta do Setor (dentro da Edificação)
-      const sectorFolderId = await resolveLocationPath(locationParts, topicFolderId);
-
-      let driveUrl = "Sincronizado Apenas Texto";
-      let driveFileId = "";
-      let aiAnalysis = null;
-      const comentario = item.type === 'photo' ? item.caption : (item.text || "");
-
-      if (item.type === 'photo') {
-        // 1. Download e Análise IA
-        await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `🧠 ${currentStep} Analisando com Gemini IA...`);
-        const fileLink = await ctx.telegram.getFileLink(item.file_id);
-        const response = await axios.get(fileLink.toString(), { 
-          responseType: 'arraybuffer',
-          timeout: 30000 // 30 segundos
-        });
-        const buffer = Buffer.from(response.data);
-        
-        // Chamada assíncrona para o Gemini
-        aiAnalysis = await analyzeInspectionPhoto(buffer, comentario);
-
-        // 2. Upload para Drive
-        await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `📤 ${currentStep} Fazendo upload para o Drive...`);
-        const fileName = `${item.timestamp}_evidencia.jpg`;
-        const driveDescriptionPayload = `${localLocation} | ${topicName} | ${comentario}`;
-        
-        const readable = new stream.PassThrough();
-        readable.end(buffer);
-        
-        const uploadResult = await uploadPhotoToDrive(readable, fileName, sectorFolderId, driveDescriptionPayload);
-        driveUrl = uploadResult.driveUrl;
-        driveFileId = uploadResult.fileId;
-      }
-
-      // 3. Registro no JSON de Metadados do Setor
-      await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `💾 ${currentStep} Atualizando metadados JSON...`);
-      const metadataRecords = await readDriveJson(sectorFolderId, "metadata.json");
-      const userName = ctx.from.username || ctx.from.first_name || 'Desconhecido';
-      const dtStr = new Date(item.timestamp * 1000).toISOString();
-
-      const newRecord = {
-        fileName: item.type === 'photo' ? `${item.timestamp}_evidencia.jpg` : 'nota.txt',
-        driveFileId,
-        driveUrl,
-        timestamp: dtStr,
-        inspector: userName,
-        location: localLocation,
-        inspectorComment: comentario,
-        aiAnalysis: aiAnalysis || "Análise indisponível"
-      };
-
-      metadataRecords.unshift(newRecord); // Novo registro no topo
-      await writeDriveJson(sectorFolderId, "metadata.json", metadataRecords);
-
-      // 4. Registro no Google Sheets (Aba do Setor)
-      await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `📊 ${currentStep} Registrando na planilha...`);
-      const tabName = await findOrCreateSheetTab(spreadsheetId, sectorName);
-      
-      const aiCommentStr = aiAnalysis 
-        ? `CRITICIDADE: ${aiAnalysis.criticidade} | FALHA: ${aiAnalysis.falha} | DIRETRIZ: ${aiAnalysis.diretriz}`
-        : "N/A";
-
-      const sheetRow = [
-        dtStr,
-        userName,
-        newRecord.fileName,
-        driveUrl,
-        comentario,
-        aiCommentStr,
-        driveFileId,
-        localLocation,
-        item.isReinspection ? "RE-INSPEÇÃO" : "ORIGINAL"
-      ];
-
-      await appendToSheetTab(spreadsheetId, tabName, sheetRow);
-
-      // Remove com segurança o item processado da sessão original
-      ctx.session.mediaBuffer.shift();
+    // Agrupar por setor para minimizar trocas de pasta/aba
+    const groupedBySector: Record<string, any[]> = {};
+    for (const item of ctx.session.mediaBuffer) {
+      const loc = item.location || "Indefinida";
+      if (!groupedBySector[loc]) groupedBySector[loc] = [];
+      groupedBySector[loc].push(item);
     }
 
+    const sectors = Object.keys(groupedBySector);
+    let processedCount = 0;
+    const userName = ctx.from.username || ctx.from.first_name || 'Desconhecido';
+
+    for (const sectorLocation of sectors) {
+      const items = groupedBySector[sectorLocation];
+      const locationParts = sectorLocation.split('/');
+      const sectorName = locationParts[locationParts.length - 1].trim();
+      
+      const sectorFolderId = await resolveLocationPath(locationParts, topicFolderId);
+      const tabName = await findOrCreateSheetTab(spreadsheetId, sectorName);
+      
+      const sheetRows: any[][] = [];
+
+      // Processar itens do setor em paralelo (chunks de 3 para não estourar rate limit)
+      const CHUNK_SIZE = 3;
+      for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+        const chunk = items.slice(i, i + CHUNK_SIZE);
+        
+        await Promise.all(chunk.map(async (item) => {
+          processedCount++;
+          const currentStep = `(${processedCount}/${bufferLength})`;
+          const comentario = item.type === 'photo' ? item.caption : (item.text || "");
+          const dtStr = new Date(item.timestamp * 1000).toISOString();
+
+          let driveUrl = "Sincronizado Apenas Texto";
+          let driveFileId = "";
+          let aiAnalysis = null;
+
+          if (item.type === 'photo') {
+            const fileLink = await ctx.telegram.getFileLink(item.file_id);
+            const response = await axios.get(fileLink.toString(), { responseType: 'arraybuffer', timeout: 30000 });
+            let buffer: Buffer | null = Buffer.from(response.data);
+            
+            // IA e Upload em paralelo para o mesmo item
+            const [analysis, upload] = await Promise.all([
+              analyzeInspectionPhoto(buffer, comentario),
+              (async () => {
+                const fileName = `${item.timestamp}_evidencia.jpg`;
+                const readable = new stream.PassThrough();
+                readable.end(buffer);
+                const result = await uploadPhotoToDrive(readable, fileName, sectorFolderId, `${sectorLocation} | ${topicName} | ${comentario}`);
+                return result;
+              })()
+            ]);
+
+            aiAnalysis = analysis;
+            driveUrl = upload.driveUrl;
+            driveFileId = upload.fileId;
+            
+            // Liberar buffer explicitamente
+            buffer = null;
+          }
+
+          const aiCommentStr = aiAnalysis 
+            ? `CRITICIDADE: ${aiAnalysis.criticidade} | FALHA: ${aiAnalysis.falha} | DIRETRIZ: ${aiAnalysis.diretriz}`
+            : "N/A";
+
+          sheetRows.push([
+            dtStr,
+            userName,
+            item.type === 'photo' ? `${item.timestamp}_evidencia.jpg` : 'nota.txt',
+            driveUrl,
+            comentario,
+            aiCommentStr,
+            driveFileId,
+            sectorLocation,
+            item.isReinspection ? "RE-INSPEÇÃO" : "ORIGINAL"
+          ]);
+
+          // Atualizar UI a cada 3 itens ou no último
+          if (processedCount % 3 === 0 || processedCount === bufferLength) {
+            await ctx.telegram.editMessageText(statusMsg.chat.id, statusMsg.message_id, undefined, `⏳ ${currentStep} Processando mídias e IA...`).catch(() => {});
+          }
+        }));
+      }
+
+      // Batch Update para o setor
+      if (sheetRows.length > 0) {
+        await appendToSheetTab(spreadsheetId, tabName, sheetRows);
+      }
+    }
+
+    const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+    ctx.session.mediaBuffer = []; // Limpa buffer após sucesso total
     
     await ctx.telegram.editMessageText(
       statusMsg.chat.id, 
       statusMsg.message_id, 
       undefined, 
-      `✅ \`${bufferLength}\` arquivos sincronizados e analisados!\n\n📂 **Pasta do Tópico:** [Acessar](https://drive.google.com/drive/folders/${topicFolderId})\n📊 **Planilha:** [Acessar](https://docs.google.com/spreadsheets/d/${spreadsheetId})\n\nSua sessão em \`${ctx.session.currentLocation}\` continua ativa.`, 
+      `✅ \`${bufferLength}\` itens sincronizados em \`${duration}s\`!\n\n📂 **Pasta:** [Acessar](https://drive.google.com/drive/folders/${topicFolderId})\n📊 **Planilha:** [Acessar](https://docs.google.com/spreadsheets/d/${spreadsheetId})`, 
       { parse_mode: 'Markdown', link_preview_options: { is_disabled: true } }
     );
 
   } catch(error: any) {
-    console.error("Falha ao subir dados:", error);
-    await ctx.reply(`❌ Ocorreu um erro no processo Cloud: ${error.message}`);
+    console.error("Falha na sincronização otimizada:", error);
+    await ctx.reply(`❌ Erro na sincronização: ${error.message}`);
   }
 });
 
@@ -239,12 +238,26 @@ bot.on(message('photo'), async (ctx) => {
   const loc = ctx.session?.currentLocation;
   
   // Pegar a foto de maior resolução
-  const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+  const photo = ctx.message.photo[ctx.message.photo.length - 1];
+  const fileId = photo.file_id;
+  const fileUniqueId = photo.file_unique_id;
   const caption = (ctx.message as any).caption || '';
   
+  // Verifica duplicidade no buffer atual para o mesmo setor
+  const isDuplicate = ctx.session.mediaBuffer.some(item => 
+    item.type === 'photo' && 
+    item.file_unique_id === fileUniqueId && 
+    item.location === loc
+  );
+
+  if (isDuplicate) {
+    return ctx.reply(`⚠️ **Foto duplicada detectada!**\nEsta imagem já foi adicionada ao setor: \`${loc || 'Modo Lote'}\` e não será repetida.`);
+  }
+
   ctx.session.mediaBuffer.push({
     type: 'photo',
     file_id: fileId,
+    file_unique_id: fileUniqueId,
     caption: caption,
     timestamp: (ctx.message as any).forward_date || ctx.message.date,
     location: loc, // Pode ser undefined (Modo Lote)
